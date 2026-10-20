@@ -19,7 +19,36 @@ class NSLKDDDataset(Dataset):
         return self.features[idx], self.labels[idx]
 
 
-def load_data(filepath, num_clients=3):
+def dirichlet_partition(y_train, num_clients, alpha=0.5):
+    """
+    Partitions training indices across clients using a Dirichlet distribution Dir(alpha).
+    - alpha -> 0 : Extreme Non-IID (each client gets mostly one class)
+    - alpha -> infinity : IID distribution
+    """
+    num_classes = len(np.unique(y_train))
+    client_indices = [[] for _ in range(num_clients)]
+
+    for k in range(num_classes):
+        idx_k = np.where(y_train == k)[0]
+        np.random.shuffle(idx_k)
+
+        # Sample relative proportions from Dirichlet distribution
+        proportions = np.random.dirichlet(np.repeat(alpha, num_clients))
+
+        # Convert proportions into index split points
+        split_points = (np.cumsum(proportions) * len(idx_k)).astype(int)[:-1]
+        idx_splits = np.split(idx_k, split_points)
+
+        for client_id, idx_split in enumerate(idx_splits):
+            client_indices[client_id].extend(idx_split)
+
+    for client_id in range(num_clients):
+        np.random.shuffle(client_indices[client_id])
+
+    return client_indices
+
+
+def load_data(filepath, num_clients=3, alpha=0.5):
     cols = ['duration', 'protocol_type', 'service', 'flag', 'src_bytes', 'dst_bytes', 'land', 'wrong_fragment',
             'urgent', 'hot', 'num_failed_logins', 'logged_in', 'num_compromised', 'root_shell', 'su_attempted',
             'num_root', 'num_file_creations', 'num_shells', 'num_access_files', 'num_outbound_cmds', 'is_host_login',
@@ -30,11 +59,9 @@ def load_data(filepath, num_clients=3):
             'dst_host_serror_rate', 'dst_host_srv_serror_rate', 'dst_host_rerror_rate', 'dst_host_srv_rerror_rate',
             'attack', 'level']
 
-    # Resolve project root directory (parent folder of src/)
     src_dir = os.path.dirname(os.path.abspath(__file__))
     project_root = os.path.dirname(src_dir)
 
-    # Check all possible locations relative to project root or current working dir
     candidate_paths = [
         os.path.join(project_root, filepath),
         os.path.join(project_root, 'data', 'nsl-kdd', 'KDDTrain+.txt'),
@@ -76,12 +103,20 @@ def load_data(filepath, num_clients=3):
     cent_train = DataLoader(NSLKDDDataset(X_train, y_train), batch_size=64, shuffle=True)
     cent_test = DataLoader(NSLKDDDataset(X_test, y_test), batch_size=64, shuffle=False)
 
+    # Partition indices using Dirichlet sampling
+    client_indices = dirichlet_partition(y_train, num_clients=num_clients, alpha=alpha)
+
     client_loaders = []
-    chunk = len(X_train) // num_clients
-    for i in range(num_clients):
-        start = i * chunk
-        end = (i + 1) * chunk if i != num_clients - 1 else len(X_train)
-        client_loaders.append(
-            DataLoader(NSLKDDDataset(X_train[start:end], y_train[start:end]), batch_size=64, shuffle=True))
+    for client_id, indices in enumerate(client_indices):
+        X_client = X_train[indices]
+        y_client = y_train[indices]
+
+        # Log class breakdown per client
+        normals = np.sum(y_client == 0)
+        attacks = np.sum(y_client == 1)
+        print(
+            f"[Client {client_id}] Samples: {len(indices)} | Normal: {normals} ({normals / len(indices) * 100:.1f}%), Attack: {attacks} ({attacks / len(indices) * 100:.1f}%)")
+
+        client_loaders.append(DataLoader(NSLKDDDataset(X_client, y_client), batch_size=64, shuffle=True))
 
     return client_loaders, cent_train, cent_test, X.shape[1]
